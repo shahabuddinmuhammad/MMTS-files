@@ -1,0 +1,776 @@
+//assume cycle stations are everywhere at each hop.
+
+//at every bus/train station, do we get off and take another ? No. if YES, transfer delay is added.
+//how to incorporate delay, delay should happen once but does it propagate ?
+
+//Previous version:
+//nodes: 1 to 17, all times in hours, distance in KM, and speed in km/hr.
+//taxiCar is a choice at every node, but available at node i with probability p_avail_taxi_node_i
+//bus is a choice at bus stations only, but will arrive on time with probability p_bus_ontime
+//bus can move through nodes as an intermediate route even if there is no bus station at that node. It won't stop there.
+//train is also available at train station only but may delay with probability p_delay_train.
+//train can't even move through nodes if there is no train station. In other words, trains have seperate track, so  
+//train will reach their Destination by by-passing intermediate road. e.g. for train we can go 14 to 16 directly.
+//cycle station (i.e. 1), means one can take cycle, one may leave cycle at any node.
+//Only Station will allow to change the transportation mode. If a state is not bus station, there you don't have any choice
+//but to remain in the bus. If a station is not a train station, then only choice is to remain in train. 
+
+const int sameCongProb=1;//=1;//=0;//=1;//1=true, 0=false (if 1, pCongFixed is used for all roads)
+const double pCongFixed;//=0;//(probability of congestion in all roads. used when sameCongProb=1) 
+
+const int sameWeights=1;
+const int all_weights = 1;
+const double w_times=0.5;//weight for time
+const double w_emissions=0.5;//weight for emission
+const double w_costs=0.5;//weight for cost
+const double w_switches=0.5;//weight for switches
+const double eps = 0.0001;
+
+//SECTION WISE VARIABLES SETTINGS
+
+//********************************************************************
+//10.6 Robust Policy Synthesis (Worst-case Guarantees).
+//pCongFixed        \in \{0,0.2,0.4,0.6,0.8,1.0\}
+//incidentNode      \in \{2,\ldots,16\}
+//incidentType      \in \{1,2,3,4,5\}
+//disabledNode      \in \{2,\ldots,16\}
+//disabledLink      \in \{1,\ldots,25\}
+//delayNode         \in \{1,\ldots,17\}
+//delayInMin        \in \{5,10,15,20\}
+//p_car_delay       \in \{0,0.5,1\}
+//p_bus_delay       \in \{0,0.5,1\}
+//p_train_delay     \in \{0,0.5,1\}
+//p_cycle_delay     \in \{0,0.5,1\}
+//lanes4Bus         \in \{0,1\}
+//********************************************************************
+//10.5 Weather impact.
+const int cloudyNode;//=0;//=9;//=0;//=1;//=9;//this node will represent the center of cloud.
+const int cloudRadius;//=0;//=10;//=2;//=5;//use it for normal rain, radius = 5km;
+const double rainVolDiscCar;//=1;// 0=very heavy rain so car is stopped, 1=drizzling so car is running normally;
+const double rainVolDiscBus;//=1;//=0.5;//0=very heavy rain so bus is stopped, 1=drizzling so bus is running normally
+//lanes4Bus={0,1}.
+
+//********************************************************************
+//10.4 Impact of Stochastic Delays, i set Lanes4Bus to 0.
+const int delayNode=0;//=0;//1 to 17
+const double delayInMin=0;//=0;//=60;//delay in minutes when waiting for a transport
+const double p_car_delay=0;//=0;// = 1;//prob that car will be delayed
+const double p_bus_delay=0;//=0;// = 1;//prob that bus will be delayed
+const double p_train_delay=0;//=0;// = 1;//prob that train will be delayed
+const double p_cycle_delay=0;//=0;//prob that cycle will be delayed
+const double carDelay=delayInMin/60;//in hrs
+const double busDelay=delayInMin/60;
+const double trainDelay=delayInMin/60;
+const double cycleDelay=delayInMin/60;
+//********************************************************************
+//10.3 Impact of Stochastic Events (Incidents, Weather)
+//How do stochastic disruptions (accidents, weather, breakdowns) alter optimal routing policies and system efficiency
+//Vary: incidentNode, incidentType, delay probabilities, lanes4Bus. Compare policies + rewards
+const int incidentNode=0;//for this node, congestionIncrementFactor is applied. the following are incident types
+const int normalConges=1; const int heavyTraffic=2; const int accident=3; const int vehicleBreakdown=4; const int roadBlockage=5;
+const int incidentType=1;//=1;//always (1 to 5) (normal=1; heavy=2; accident=3; vehicleBreakdown=4; roadBlockage=5)
+//********************************************************************
+//10.2 Infrastructure Design Under Uncertainty
+//find where station should be built to manimize travel time.
+const int allStations=0;//[1-3] every node is a station for: 1=cycle, 2=bus, 3=car
+//vary pCongFixed from 0 to 1 with 0.1 diff, lanes4Bus=0,1, and plot R{time}
+//********************************************************************
+//10.1 Critical Node Identification (System Vulnerability)
+const int disabledNode=0;//[2-16]//0 means no node is disabled. disabled node can't be the next available hop.
+const int disabledLink=0;//[1-25]//0 means no link is disabled. If not zero, Even if a node is enabled, this link can't be used to go to this node.
+//disabledLinks are 1=1-2, 2=2-3, 3=1-4, 4=2-5, 5=3-7, 6=4-5, 7=5-6, 8=6-7, 9=4-8, 10=5-9, 11=7-10, 12=8-9
+//13=9-10, 14=8-11, 15=9-12, 16=9-13, 17=10-13, 18=10-17, 19=11-12, 20=11-14, 21=12-15, 22=13-16, 23=14-15
+//24=15-16, 25=16-17
+//********************************************************************
+
+const int T=0;//=0;//=0;//time
+const int Em=0;//CO_2 emission
+
+const int busLaneTest = 0; const double allSpeed = 100; //not using it right now in any test
+const int lanes4Bus;//=0;// = 0; //1=bus is like train, no impact of congestion, 0=buses travel like cars
+
+
+formula w_time = (sameWeights=1)?all_weights:w_times;
+formula w_emission = (sameWeights=1)?all_weights:w_emissions;
+formula w_cost = (sameWeights=1)?all_weights:w_costs;
+formula w_switch = (sameWeights=1)?all_weights:w_switches;
+
+const int carTravelCost=10;const int carEmission=5;
+const int cycleTravelCost=1;const double cycleEmission=eps;
+const int trainTravelCost=20;const int trainEmission=10;
+const int busTravelCost=5;const int busEmission=15;
+
+const double speedTrains=90;const double speedCycles=20;const double speedCars=100;const double speedBuses=80;
+
+formula speedTrain=(busLaneTest=1)?allSpeed:speedTrains;//(in km/hr)
+formula speedCycle=(busLaneTest=1)?allSpeed:speedCycles;
+formula speedCar1=speedCars;//if nozones=1, use this speed all the way (s=vt, so 10/200 *60 = 3 min)
+formula speedBus1=(busLaneTest=1)?allSpeed:speedBuses;//if nozones=1, use this speed all the way
+
+label "target" = (done=true);
+
+//input to the model
+const int Source=1;//=1;
+const int Destination=17;//=17;
+
+
+const int noZones=1;//no zonal consideration if set to 1.
+const int minPerHr = 60;//60 minutes in one hour;
+const int xferDelayInMin=5;//when mode is switched, this is the extra delay.
+
+const double transferDelay = xferDelayInMin/60;//whenever mode is switched, we add this additional delay in hours.
+//all speed in km/hr
+const double carSpeedStatutory=110;const double carSpeedSchool=30;const double carSpeedOffice=65;const double carSpeedAdvisory=25;
+//const double carSpeedStatutory=1;const double carSpeedSchool=1;const double carSpeedOffice=1;const double carSpeedAdvisory=1;
+const double busSpeedStatutory=1;const double busSpeedSchool=1;const double busSpeedOffice=1;const double busSpeedAdvisory=1;
+
+//distances in KM and time is in hrs (since speed is also written in km/hr)
+const double distance1=10;//10;//(in km)
+const double distMultiple1 = 2;//keep it 2
+const double distMultiple2 = 1.5; //keep it 1.5
+const double distMultiple3 = 0.5;//keep it 0.5;
+const double distance2 = distance1*distMultiple1; const double distance3 = distance1*distMultiple2;
+const int statutory=1; const int school=2; const int office=3; const int advisory=4;
+formula congestionNode = (s=incidentNode | sp=incidentNode);//(s=2|s=3|s=5|s=7|s=9|s=10|s=12|s=13|s=15|s=17);
+
+formula everyNodeIsCycleStation = (allStations=1);
+formula everyNodeIsBusStation = (allStations=2);
+formula everyNodeIsCarStation = (allStations=3);
+const int everyNodeIsTrainStation=0;//this is always 0, otherwise code has to be updated
+formula cycleStation = (everyNodeIsCycleStation)?true:(s=1|s=2|s=3|s=5|s=7|s=9|s=10|s=12|s=13|s=15|s=17);//(s=3|s=5|s=8|s=13|s=15|s=17);
+formula carStation = (everyNodeIsCarStation)?true:(s=2|s=3|s=5|s=7|s=9|s=10|s=12|s=13|s=15|s=17);
+formula busStation = (everyNodeIsBusStation)?true:(s=2|s=3|s=5|s=7|s=9|s=10|s=12|s=13|s=15|s=17);
+formula trainStation = (everyNodeIsTrainStation=1)?true:(s=4|s=6|s=8|s=11|s=14|s=16|s=17);
+
+formula modeSelected = (ccycle|ctrain|cbus|ccar);
+
+formula isStation = (ccycle?cycleStation:(ctrain?trainStation:(cbus?busStation:true)));
+
+formula zone = (s=1)? office: (s=12)?school: (s=13)?advisory: statutory;
+formula speedCarTemp1=(zone=statutory)?carSpeedStatutory:(zone=school)?carSpeedSchool:
+			(zone=office)?carSpeedOffice:(zone=advisory)?carSpeedAdvisory:0; //speed=km/h
+formula speedCarTemp=(noZones=1)?speedCar1:speedCarTemp1;
+formula speedCar = (rainystate)?speedCarTemp*rainVolDiscCar:speedCarTemp;
+formula speedBusTemp1=(zone=statutory)?busSpeedStatutory:(zone=school)?busSpeedSchool:
+			(zone=office)?busSpeedOffice:(zone=advisory)?busSpeedAdvisory:0;
+formula speedBusTemp=(noZones=1)?speedBus1:speedBusTemp1;
+formula speedBus = (rainystate)?speedBusTemp*rainVolDiscBus:speedBusTemp;
+
+formula speedOfChosenVehicle = (ccycle?speedCycle:(ctrain?speedTrain:(cbus?speedBus:(ccar?speedCar:0))));//make sure you check ccar at the end.
+formula p_delay = (ccycle?p_cycle_delay:(ctrain?p_train_delay:(cbus?p_bus_delay:(ccar?p_car_delay:0))));
+//time = hours (since distance is km and speed is km/hr)
+//here (sp=1 & s=1)?D14 is a special case ONLY used in first hop, otherwise 1st hop time won't work.
+formula distCurrent = (Source=Destination)?0:((sp=1 & s=2)?D12:((sp=1 & s=4)?D14:
+			((sp=2 & s=3)?D23:((sp=2 & s=1)?D21:((sp=2 & s=5)?D25:
+			((sp=3 & s=2)?D32:((sp=3 & s=7)?D37:
+			((sp=4 & s=1)?D41:((sp=4 & s=5)?D45:((sp=4 & s=8)?D48:((sp=4 & s=6)?D46:
+			((sp=5 & s=2)?D52:((sp=5 & s=4)?D54:((sp=5 & s=6)?D56:((sp=5 & s=9)?D59:
+			((sp=6 & s=5)?D65:((sp=6 & s=7)?D67:((sp=6 & s=4)?D64:
+			((sp=7 & s=3)?D73:((sp=7 & s=6)?D76:((sp=7 & s=10)?D710:
+			((sp=8 & s=4)?D84:((sp=8 & s=9)?D89:((sp=8 & s=11)?D811:
+			((sp=9 & s=5)?D95:((sp=9 & s=8)?D98:((sp=9 & s=10)?D910:((sp=9 & s=12)?D912:((sp=9 & s=13)?D913:
+			((sp=10 & s=7)?D107:((sp=10 & s=9)?D109:((sp=10 & s=13)?D1013:((sp=10 & s=17)?D1017:
+			((sp=11 & s=8)?D118:((sp=11 & s=12)?D1112:((sp=11 & s=14)?D1114:
+			((sp=12 & s=9)?D129:((sp=12 & s=11)?D1211:((sp=12 & s=15)?D1215:
+			((sp=13 & s=9)?D139:((sp=13 & s=10)?D1310:((sp=13 & s=16)?D1316:
+			((sp=14 & s=11)?D1411:((sp=14 & s=15)?D1415:((sp=14 & s=16)?D1416:
+			((sp=15 & s=12)?D1512:((sp=15 & s=14)?D1514:((sp=15 & s=16)?D1516:
+			((sp=16 & s=13)?D1613:((sp=16 & s=15)?D1615:((sp=16 & s=17)?D1617:((sp=16 & s=14)?D1614:
+			((sp=17 & s=10)?D1710:((sp=17 & s=16)?D1716:
+			(0)))))))))))))))))))))))))))))))))))))))))))))))))))))));
+formula p46=0;formula p64=0;formula p1416=0; formula p1614=0;
+formula pCongCurrent = (sp=1 & s=2)?p12:((sp=1 & s=4)?p14:
+			((sp=2 & s=3)?p23:((sp=2 & s=1)?p21:((sp=2 & s=5)?p25:
+			((sp=3 & s=2)?p32:((sp=3 & s=7)?p37:
+			((sp=4 & s=1)?p41:((sp=4 & s=5)?p45:((sp=4 & s=8)?p48:((sp=4 & s=6)?p46:
+			((sp=5 & s=2)?p52:((sp=5 & s=4)?p54:((sp=5 & s=6)?p56:((sp=5 & s=9)?p59:
+			((sp=6 & s=5)?p65:((sp=6 & s=7)?p67:((sp=6 & s=4)?p64:
+			((sp=7 & s=3)?p73:((sp=7 & s=6)?p76:((sp=7 & s=10)?p710:
+			((sp=8 & s=4)?p84:((sp=8 & s=9)?p89:((sp=8 & s=11)?p811:
+			((sp=9 & s=5)?p95:((sp=9 & s=8)?p98:((sp=9 & s=10)?p910:((sp=9 & s=12)?p912:((sp=9 & s=13)?p913:
+			((sp=10 & s=7)?p107:((sp=10 & s=9)?p109:((sp=10 & s=13)?p1013:((sp=10 & s=17)?p1017:
+			((sp=11 & s=8)?p118:((sp=11 & s=12)?p1112:((sp=11 & s=14)?p1114:
+			((sp=12 & s=9)?p129:((sp=12 & s=11)?p1211:((sp=12 & s=15)?p1215:
+			((sp=13 & s=9)?p139:((sp=13 & s=10)?p1310:((sp=13 & s=16)?p1316:
+			((sp=14 & s=11)?p1411:((sp=14 & s=15)?p1415:((sp=14 & s=16)?p1416:
+			((sp=15 & s=12)?p1512:((sp=15 & s=14)?p1514:((sp=15 & s=16)?p1516:
+			((sp=16 & s=13)?p1613:((sp=16 & s=15)?p1615:((sp=16 & s=17)?p1617:((sp=16 & s=14)?p1614:
+			((sp=17 & s=10)?p1710:((sp=17 & s=16)?p1716:
+			(0))))))))))))))))))))))))))))))))))))))))))))))))))))));
+
+formula timeCurrentTmp = distCurrent/max((1-pCongCurrent)*speedOfChosenVehicle, 0.0001);
+formula delayedNode = (s=delayNode)?true:false;
+formula delayCurrent = (delayedNode & ccar)?carDelay:((delayedNode & cbus)?busDelay:
+			((delayedNode & ctrain)?trainDelay:((delayedNode & ccycle)?cycleDelay:0)));
+formula timeCurrent = (delayed)?(timeCurrentTmp+delayCurrent):timeCurrentTmp;
+
+formula canDropHere = (ccycle & cycleStation)|(ccar & carStation)|(ctrain & trainStation)|(cbus & busStation);
+formula canTakeCycle = (s=Source | canDropHere) & cycleStation;
+formula canTakeBus = (s=Source | canDropHere) & busStation;
+formula canTakeTrain = (s=Source | canDropHere) & trainStation;
+formula canTakeCar = (s=Source | canDropHere) & carStation;
+
+mdp
+
+module NextHop
+	s:[1..17] init Source;
+	sp:[1..17] init Source;//s_previous
+	done: bool init false;
+	next: bool init true;//ensures time and other parameters are calculated when all variables are initialized
+	selectTransport: bool init false;
+	decidedDelay: bool init false;
+	delayed: bool init false;
+	ccycle: bool init false;//choose cycle, all ccycle, ccar, cbus, ctrain are mutually exclusive.
+	ccar: bool init false;
+	cbus: bool init false;
+	ctrain: bool init false;
+	continuing: bool init false;
+
+//generalized transitions
+//111111111111111111111111111111: select transport
+	[continueCycle]  next & !selectTransport & ccycle -> (selectTransport'=true) & (continuing'=true);
+	[cycle]  next & !selectTransport & !ccycle & canTakeCycle -> 
+			(ccycle'=true)& (ccar'=false) & (cbus'=false) & (ctrain'=false) & (selectTransport'=true) & (continuing'=false);
+
+	[continueBus]  next & !selectTransport & cbus -> (selectTransport'=true) & (continuing'=true);
+	[bus]  next & !selectTransport & !cbus & canTakeBus -> 
+			(ccycle'=false)& (ccar'=false) & (cbus'=true) & (ctrain'=false) & (selectTransport'=true) & (continuing'=false);
+
+	[continueTrain] next & !selectTransport & ctrain -> (selectTransport'=true) & (continuing'=true);
+	[train] next & !selectTransport & !ctrain & canTakeTrain -> 
+			(ccycle'=false) & (cbus'=false) & (ccar'=false) & (ctrain'=true) & (selectTransport'=true) & (continuing'=false);
+
+	[continueCar] next & !selectTransport & ccar -> (selectTransport'=true) & (continuing'=true);
+	[car] next & !selectTransport & !ccar & canTakeCar -> 
+			(ccycle'=false) & (ccar'=true) & (cbus'=false) & (ctrain'=false) & (selectTransport'=true) & (continuing'=false);
+
+//22222222222222222222222222222222222222: decide delay
+
+	[decideDelay] next & !continuing & selectTransport & !decidedDelay -> 
+			p_delay:(delayed'=true)&(decidedDelay'=true)+(1-p_delay):(delayed'=false)&(decidedDelay'=true);
+	[decideDelay] next & continuing & selectTransport & !decidedDelay -> (delayed'=false)&(decidedDelay'=true);
+
+//33333333333333333333333333333333333333333: traffic
+
+//specific transitions (only train needs special treatment, you may jump direct to a destination via train tracks)
+//1: cycle station
+	[] disabledLink!=1 & disabledNode!=2 & next & selectTransport & decidedDelay & s=1 ->(s'=2) & (selectTransport'=false)&(sp'=1)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=3 & disabledNode!=4 & next & selectTransport & decidedDelay & s=1 ->(s'=4) & (selectTransport'=false)&(sp'=1)&(decidedDelay'=false)&(next'=false);
+//2: bus station
+	[] disabledLink!=1 & disabledNode!=1 & next & selectTransport & decidedDelay & s=2 ->(s'=1) & (selectTransport'=false)&(sp'=2)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=2 & disabledNode!=3 & next & selectTransport & decidedDelay & s=2 ->(s'=3) & (selectTransport'=false)&(sp'=2)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=4 & disabledNode!=5 & next & selectTransport & decidedDelay & s=2 ->(s'=5) & (selectTransport'=false)&(sp'=2)&(decidedDelay'=false)&(next'=false);
+//3: bus station
+	[] disabledLink!=2 & disabledNode!=2 & next & selectTransport & decidedDelay & s=3 ->(s'=2) & (selectTransport'=false)&(sp'=3)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=5 & disabledNode!=7 & next & selectTransport & decidedDelay & s=3 ->(s'=7) & (selectTransport'=false)&(sp'=3)&(decidedDelay'=false)&(next'=false);
+//4: train station
+	[] disabledLink!=3 & disabledNode!=1 & next & selectTransport & decidedDelay & s=4 & !ctrain ->(s'=1) & (selectTransport'=false)&(sp'=4)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=6 & disabledNode!=5 & next & selectTransport & decidedDelay & s=4 & !ctrain ->(s'=5) & (selectTransport'=false)&(sp'=4)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=9 & disabledNode!=8 & next & selectTransport & decidedDelay & s=4 ->(s'=8) & (selectTransport'=false)&(sp'=4)&(decidedDelay'=false)&(next'=false);
+	[] disabledNode!=6 & next & selectTransport & decidedDelay & s=4 & ctrain ->(s'=6) & (selectTransport'=false)&(sp'=4)&(decidedDelay'=false)&(next'=false);
+//5: bus station
+	[] disabledLink!=4 & disabledNode!=2 & next & selectTransport & decidedDelay & s=5 ->(s'=2) & (selectTransport'=false)&(sp'=5)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=6 & disabledNode!=4 & next & selectTransport & decidedDelay & s=5 ->(s'=4) & (selectTransport'=false)&(sp'=5)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=7 & disabledNode!=6 & next & selectTransport & decidedDelay & s=5 ->(s'=6) & (selectTransport'=false)&(sp'=5)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=10 & disabledNode!=9 & next & selectTransport & decidedDelay & s=5 ->(s'=9) & (selectTransport'=false)&(sp'=5)&(decidedDelay'=false)&(next'=false);
+//6: train station
+	[] disabledLink!=7 & disabledNode!=5 & next & selectTransport & decidedDelay & s=6 & !ctrain ->(s'=5) & (selectTransport'=false)&(sp'=6)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=8 & disabledNode!=7 & next & selectTransport & decidedDelay & s=6 & !ctrain ->(s'=7) & (selectTransport'=false)&(sp'=6)&(decidedDelay'=false)&(next'=false);
+	[] disabledNode!=4 & next & selectTransport & decidedDelay & s=6 & ctrain ->(s'=4) & (selectTransport'=false)&(sp'=6)&(decidedDelay'=false)&(next'=false);
+//7: bus station
+	[] disabledLink!=5 & disabledNode!=3 & next & selectTransport & decidedDelay & s=7 ->(s'=3) & (selectTransport'=false)&(sp'=7)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=8 & disabledNode!=6 & next & selectTransport & decidedDelay & s=7 ->(s'=6) & (selectTransport'=false)&(sp'=7)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=11 & disabledNode!=10 & next & selectTransport & decidedDelay & s=7 ->(s'=10) & (selectTransport'=false)&(sp'=7)&(decidedDelay'=false)&(next'=false);
+//8: train
+	[] disabledLink!=9 & disabledNode!=4 & next & selectTransport & decidedDelay & s=8 ->(s'=4) & (selectTransport'=false)&(sp'=8)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=12 & disabledNode!=9 & next & selectTransport & decidedDelay & s=8 & !ctrain ->(s'=9) & (selectTransport'=false)&(sp'=8)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=14 & disabledNode!=11 & next & selectTransport & decidedDelay & s=8 ->(s'=11) & (selectTransport'=false)&(sp'=8)&(decidedDelay'=false)&(next'=false);
+//9: bus
+	[] disabledLink!=10 & disabledNode!=5 & next & selectTransport & decidedDelay & s=9 ->(s'=5) & (selectTransport'=false)&(sp'=9)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=12 & disabledNode!=8 & next & selectTransport & decidedDelay & s=9 ->(s'=8) & (selectTransport'=false)&(sp'=9)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=13 & disabledNode!=10 & next & selectTransport & decidedDelay & s=9 ->(s'=10) & (selectTransport'=false)&(sp'=9)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=15 & disabledNode!=12 & next & selectTransport & decidedDelay & s=9 ->(s'=12) & (selectTransport'=false)&(sp'=9)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=16 & disabledNode!=13 & next & selectTransport & decidedDelay & s=9 ->(s'=13) & (selectTransport'=false)&(sp'=9)&(decidedDelay'=false)&(next'=false);
+//10: bus
+	[] disabledLink!=11 & disabledNode!=7 & next & selectTransport & decidedDelay & s=10 ->(s'=7) & (selectTransport'=false)&(sp'=10)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=13 & disabledNode!=9 & next & selectTransport & decidedDelay & s=10 ->(s'=9) & (selectTransport'=false)&(sp'=10)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=17 & disabledNode!=13 & next & selectTransport & decidedDelay & s=10 ->(s'=13) & (selectTransport'=false)&(sp'=10)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=18 & disabledNode!=17 & next & selectTransport & decidedDelay & s=10 ->(s'=17) & (selectTransport'=false)&(sp'=10)&(decidedDelay'=false)&(next'=false);
+//11: train
+	[] disabledLink!=14 & disabledNode!=8 & next & selectTransport & decidedDelay & s=11 ->(s'=8) & (selectTransport'=false)&(sp'=11)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=19 & disabledNode!=12 & next & selectTransport & decidedDelay & s=11 & !ctrain ->(s'=12) & (selectTransport'=false)&(sp'=11)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=20 & disabledNode!=14 & next & selectTransport & decidedDelay & s=11 ->(s'=14) & (selectTransport'=false)&(sp'=11)&(decidedDelay'=false)&(next'=false);
+//12: bus
+	[] disabledLink!=15 & disabledNode!=9 & next & selectTransport & decidedDelay & s=12 ->(s'=9) & (selectTransport'=false)&(sp'=12)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=19 & disabledNode!=11 & next & selectTransport & decidedDelay & s=12 ->(s'=11) & (selectTransport'=false)&(sp'=12)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=21 & disabledNode!=15 & next & selectTransport & decidedDelay & s=12 ->(s'=15) & (selectTransport'=false)&(sp'=12)&(decidedDelay'=false)&(next'=false);
+//13: bus
+	[] disabledLink!=16 & disabledNode!=9 & next & selectTransport & decidedDelay & s=13 ->(s'=9) & (selectTransport'=false)&(sp'=13)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=17 & disabledNode!=10 & next & selectTransport & decidedDelay & s=13 ->(s'=10) & (selectTransport'=false)&(sp'=13)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=22 & disabledNode!=16 & next & selectTransport & decidedDelay & s=13 ->(s'=16) & (selectTransport'=false)&(sp'=13)&(decidedDelay'=false)&(next'=false);
+//14: train station
+	[] disabledLink!=20 & disabledNode!=11 & next & selectTransport & decidedDelay & s=14 ->(s'=11) & (selectTransport'=false)&(sp'=14)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=23 & disabledNode!=15 & next & selectTransport & decidedDelay & s=14 & !ctrain ->(s'=15) & (selectTransport'=false)&(sp'=14)&(decidedDelay'=false)&(next'=false);
+	[] disabledNode!=16 & next & selectTransport & decidedDelay & s=14 & ctrain ->(s'=16) & (selectTransport'=false)&(sp'=14)&(decidedDelay'=false)&(next'=false);
+//15: bus station
+	[] disabledLink!=21 & disabledNode!=12 & next & selectTransport & decidedDelay & s=15 ->(s'=12) & (selectTransport'=false)&(sp'=15)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=23 & disabledNode!=14 & next & selectTransport & decidedDelay & s=15 ->(s'=14) & (selectTransport'=false)&(sp'=15)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=24 & disabledNode!=16 & next & selectTransport & decidedDelay & s=15 ->(s'=16) & (selectTransport'=false)&(sp'=15)&(decidedDelay'=false)&(next'=false);
+//16: train station
+	[] disabledLink!=22 & disabledNode!=13 & next & selectTransport & decidedDelay & s=16 & !ctrain ->(s'=13) & (selectTransport'=false)&(sp'=16)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=24 & disabledNode!=15 & next & selectTransport & decidedDelay & s=16 & !ctrain ->(s'=15) & (selectTransport'=false)&(sp'=16)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=25 & disabledNode!=17 & next & selectTransport & decidedDelay & s=16 ->(s'=17) & (selectTransport'=false)&(sp'=16)&(decidedDelay'=false)&(next'=false);
+	[] disabledNode!=14 & next & selectTransport & decidedDelay & s=16 & ctrain ->(s'=14) & (selectTransport'=false)&(sp'=16)&(decidedDelay'=false)&(next'=false);
+//17: bus station
+	[] disabledLink!=18 & disabledNode!=10 & next & selectTransport & decidedDelay & s=17 ->(s'=10) & (selectTransport'=false)&(sp'=17)&(decidedDelay'=false)&(next'=false);
+	[] disabledLink!=25 & disabledNode!=16 & next & selectTransport & decidedDelay & s=17 ->(s'=16) & (selectTransport'=false)&(sp'=17)&(decidedDelay'=false)&(next'=false);
+
+//4444444444444444444444444444444444444444444444: calculate
+
+	[calculate] !(s=Destination) & !next -> (next'=true);//note that "calculate" is added here so that time is calculated 
+	[calculate] s=Destination & !isStation & !next & !done -> (next'=true); //at the right time
+	[calculate] s=Destination & isStation & !next & !done -> (done'=true); //at the right time
+	[done] done -> true;
+endmodule
+
+rewards "hops" 
+	[calculate] true: 1;
+endrewards
+
+rewards "time" 
+	[calculate] continuing: timeCurrent*minPerHr;
+	[calculate] !continuing: timeCurrent*minPerHr+transferDelay;
+endrewards
+//rewards "train_time" 
+//	[calculate] ctrain & continuing: timeCurrent*minPerHr;
+//	[calculate] ctrain & !continuing: timeCurrent*minPerHr+transferDelay;
+//endrewards
+//rewards "mode_switches" 
+//	[cycle] true: 1;
+//	[car] true: 1;
+//	[bus] true: 1;
+//	[train] true: 1;
+//	[] true : eps;//this ensure that there is no zero reward, otherwise minimizing it gives error.
+//endrewards
+rewards "mode_switches" 
+	[calculate] !continuing: 1;
+	[calculate] continuing : eps;//this ensure that there is no zero reward, otherwise minimizing it gives error.
+endrewards
+//rewards "travel_cost" 
+//	[cycle] true: 1;
+//	[car] true: 10;
+//	[bus] true: 5;
+//	[train] true: 20;
+//	[] true : eps;//this ensure that there is no zero reward, otherwise minimizing it gives error.
+//endrewards
+rewards "travel_cost" 
+	[calculate] ccycle: cycleTravelCost;
+	[calculate] ccar: carTravelCost;
+	[calculate] cbus: busTravelCost;
+	[calculate] ctrain: trainTravelCost;
+	[calculate] true : eps;//this ensure that there is no zero reward, otherwise minimizing it gives error.
+endrewards
+rewards "emission" 
+	[calculate] ccycle: cycleEmission;
+	[calculate] ccar: carEmission;
+	[calculate] cbus: busEmission;
+	[calculate] ctrain: trainEmission;
+endrewards
+rewards "scalar"
+    [calculate] ccycle & continuing : w_switch*0 + w_cost*cycleTravelCost+w_time*timeCurrent*minPerHr + w_emission*cycleEmission;
+    [calculate] ccycle & !continuing : w_switch*1 + w_cost*cycleTravelCost+w_time*(timeCurrent*minPerHr+transferDelay) + w_emission*cycleEmission;
+    [calculate] ccar & continuing : w_switch*0 + w_cost*carTravelCost+w_time*timeCurrent*minPerHr + w_emission*carEmission;
+    [calculate] ccar & !continuing : w_switch*1 + w_cost*carTravelCost+w_time*(timeCurrent*minPerHr+transferDelay) + w_emission*carEmission;
+    [calculate] cbus & continuing : w_switch*0 + w_cost*busTravelCost+w_time*timeCurrent*minPerHr + w_emission*busEmission;
+    [calculate] cbus & !continuing : w_switch*1 + w_cost*busTravelCost+w_time*(timeCurrent*minPerHr+transferDelay) + w_emission*busEmission;
+    [calculate] ctrain & continuing : w_switch*0 + w_cost*trainTravelCost+w_time*timeCurrent*minPerHr + w_emission*trainEmission;
+    [calculate] ctrain & !continuing : w_switch*1 + w_cost*trainTravelCost+w_time*(timeCurrent*minPerHr+transferDelay) + w_emission*trainEmission;
+
+    [calculate] true : eps;
+endrewards
+
+
+const double D12=distance1;const double D23=distance2;const double D14=distance1;const double D25=distance1;const double D37=distance1;
+const double D45=distance1;const double D48=distance1; const double D59=distance1;const double D710=distance1;
+const double D89=distance1;const double D811=distance1;const double D912=distance1;
+const double D56=floor(distance2*distMultiple3);const double D67=floor(distance2*distMultiple3);
+const double D46=distance2;const double D910=distance2;
+const double D913=distance3;const double D1013=distance3;
+const double D1112=distance1;
+const double D1114=distance1;const double D1215=distance1;const double D1316=distance1;const double D1017=distance1*distMultiple1;
+const double D1415=distance1; const double D1416=distMultiple1*distance1;
+const double D1516=distance1;const double D1617=distance1;
+
+const double D21=D12; const double D32=D23; const double D41=D14; const double D64=D46;const double D52=D25; const double D73=D37;
+const double D54=D45; const double D65=D56; const double D76=D67;const double D84=D48; const double D95=D59; const double D107=D710;
+const double D98=D89; const double D109=D910;const double D118=D811; const double D129=D912; const double D139=D913; 
+const double D1310=D1013;
+const double D1211=D1112;const double D1411=D1114; const double D1614=D1416;
+const double D1512=D1215; const double D1613=D1316; const double D1710=D1017;
+const double D1514=D1415; const double D1615=D1516; const double D1716=D1617;
+
+
+formula sameProb=(sameCongProb=1)?true:false;//set it to true/false depending on experiment type.
+formula p00=(sameProb)?pCongFixed:0; const double p01=(sameProb)?pCongFixed:0.1; const double p02=(sameProb)?pCongFixed:0.2;
+const double p03=(sameProb)?pCongFixed:0.3; const double p04=(sameProb)?pCongFixed:0.4; const double p05=(sameProb)?pCongFixed:0.5;
+const double p06=(sameProb)?pCongFixed:0.6; const double p07=(sameProb)?pCongFixed:0.7; const double p08=(sameProb)?pCongFixed:0.8;
+const double p09=(sameProb)?pCongFixed:0.9; const double p010=(sameProb)?pCongFixed:1;
+//if buses have reserved lanes, buses don't get impacted by congestion too
+formula noCong4bus = cbus & lanes4Bus=1;
+//train/cycle face no traffic congestion, (pN = probability of congestion)
+formula p0 = (ctrain|ccycle|noCong4bus)?0:p00; formula p1 = (ctrain|ccycle|noCong4bus)?0:p01; 
+formula p2 = (ctrain|ccycle|noCong4bus)?0:p02; formula p3 = (ctrain|ccycle|noCong4bus)?0:p03;
+formula p4 = (ctrain|ccycle|noCong4bus)?0:p04; formula p5 = (ctrain|ccycle|noCong4bus)?0:p05; 
+formula p6 = (ctrain|ccycle|noCong4bus)?0:p06; formula p7 = (ctrain|ccycle|noCong4bus)?0:p07;
+formula p8 = (ctrain|ccycle|noCong4bus)?0:p08; formula p9 = (ctrain|ccycle|noCong4bus)?0:p09; 
+formula p10 = (ctrain|ccycle|noCong4bus)?0:p010;
+
+//congestion increment factor: here for roadBlockage, we increase congestion probability to 1.
+//how much percentage congestion is increased due to congestion type
+formula cIncFact = (incidentType=normalConges?1:(incidentType=heavyTraffic?1.2:
+		(incidentType=accident?1.5:(incidentType=vehicleBreakdown?1.8:(incidentType=roadBlockage?10:(1))))));
+
+formula p12 = (congestionNode)? min(1,p3*cIncFact):p3; 
+formula p14 = (congestionNode)? min(1,p7*cIncFact):p7; formula p21 = (congestionNode)? min(1,p1*cIncFact):p1; 
+formula p23 = (congestionNode)? min(1,p5*cIncFact):p5; formula p25 = (congestionNode)? min(1,p4*cIncFact):p4; formula p32 = (congestionNode)? min(1,p5*cIncFact):p5; 
+formula p37 = (congestionNode)? min(1,p5*cIncFact):p5; formula p41 = (congestionNode)? min(1,p1*cIncFact):p1; formula p45 = (congestionNode)? min(1,p1*cIncFact):p1; 
+formula p48 = (congestionNode)? min(1,p8*cIncFact):p8; formula p52 = (congestionNode)? min(1,p5*cIncFact):p5; formula p54 = (congestionNode)? min(1,p2*cIncFact):p2;
+formula p56 = (congestionNode)? min(1,p2*cIncFact):p2; formula p59 = (congestionNode)? min(1,p1*cIncFact):p1; formula p65 = (congestionNode)? min(1,p6*cIncFact):p6; 
+formula p67 = (congestionNode)? min(1,p4*cIncFact):p4; formula p73 = (congestionNode)? min(1,p1*cIncFact):p1; formula p76 = (congestionNode)? min(1,p6*cIncFact):p6; 
+formula p710 = (congestionNode)? min(1,p3*cIncFact):p3; formula p84 = (congestionNode)? min(1,p1*cIncFact):p1; formula p89 = (congestionNode)? min(1,p7*cIncFact):p7; 
+formula p811 = (congestionNode)? min(1,p2*cIncFact):p2; formula p95 = (congestionNode)? min(1,p2*cIncFact):p2; formula p98 = (congestionNode)? min(1,p1*cIncFact):p1; 
+formula p910 = (congestionNode)? min(1,p1*cIncFact):p1; formula p912 = (congestionNode)? min(1,p1*cIncFact):p1; formula p913 = (congestionNode)? min(1,p5*cIncFact):p5;
+formula p107 = (congestionNode)? min(1,p2*cIncFact):p2; formula p109 = (congestionNode)? min(1,p3*cIncFact):p3; formula p1013 = (congestionNode)? min(1,p2*cIncFact):p2; 
+formula p1017 = (congestionNode)? min(1,p3*cIncFact):p3; formula p118 = (congestionNode)? min(1,p3*cIncFact):p3; formula p1112 = (congestionNode)? min(1,p1*cIncFact):p1; 
+formula p1114 = (congestionNode)? min(1,p6*cIncFact):p6; formula p129 = (congestionNode)? min(1,p4*cIncFact):p4; formula p1211 = (congestionNode)? min(1,p2*cIncFact):p2; 
+formula p1215 = (congestionNode)? min(1,p4*cIncFact):p4; formula p139 = (congestionNode)? min(1,p2*cIncFact):p2; formula p1310 = (congestionNode)? min(1,p6*cIncFact):p6; 
+formula p1316 = (congestionNode)? min(1,p2*cIncFact):p2; formula p1411 = (congestionNode)? min(1,p2*cIncFact):p2; formula p1415 = (congestionNode)? min(1,p8*cIncFact):p8;
+formula p1512 = (congestionNode)? min(1,p3*cIncFact):p3; formula p1514 = (congestionNode)? min(1,p3*cIncFact):p3; formula p1516 = (congestionNode)? min(1,p4*cIncFact):p4;
+formula p1613 = (congestionNode)? min(1,p2*cIncFact):p2; formula p1615 = (congestionNode)? min(1,p6*cIncFact):p6; formula p1617 = (congestionNode)? min(1,p2*cIncFact):p2;
+formula p1710 = (congestionNode)? min(1,p3*cIncFact):p3; formula p1716 = (congestionNode)? min(1,p7*cIncFact):p7;
+
+//Note: Have to check if any distances are overlapping
+//Node 1 other distances:
+//const double sqrt2=1.4142;
+const double tmp16=D12+D23*distMultiple3;const double tmp17=D45+D56+D67;const double tmp19=D14+D48;const double tmp110a=D14+D48;
+const double tmp110b=D89+D910;const double tmp112=D14+D48+D811;const double tmp113a=D14+D48+D811;const double tmp113b=D1112+D1516;
+const double tmp115a=D14+D48+D811+D1114;const double tmp116=D14+D48+D811+D1114;const double tmp117a=D14+D48+D811+D1114;
+const double tmp117b=D1415+D1516+D1617;
+
+const double d1_2c=D12;const double d1_4c=D14;const double d1_3c = D12+D23; const double d1_5c =pow(D12*D12+D25*D25,0.5); //const double t15 = pow(t12*t12+t25*t25, 0.5);
+const double d1_6c=pow(tmp16*tmp16+D37*D37,0.5);const double d1_7c=pow(D14*D14+ tmp17*tmp17,0.5);const double d1_8c=D14+D48;
+const double d1_9c=pow(tmp19*tmp19+ D89*D89,0.5);const double d1_10c=pow(tmp110a*tmp110a + tmp110b*tmp110b,0.5);
+const double d1_11c=D14+D48+D811;const double d1_12c=pow(tmp112*tmp112+D1112+D1112,0.5);
+const double d1_13c=pow(tmp113a*tmp113a+tmp113b*tmp113b,0.5);const double d1_14c=D14+D48+D811+D1114;
+const double d1_15c=pow(tmp115a*tmp115a+D1415*D1415,0.5);const double d1_16c=pow(tmp116*tmp116+D1516*D1516,0.5);
+const double d1_17c=pow(tmp117a*tmp117a+tmp117b*tmp117b,0.5);
+
+
+//Note 2 other distances:
+const double tmp27=D56+D67;const double tmp28=D14+D48;const double tmp210=D25+D59;const double tmp211=D14+D48+D811;
+const double tmp213=D25+D59+D912;const double tmp214=D14+D48+D811+D1114;const double tmp216=D25+D59+D912+D1215;
+const double tmp217a=D25+D59+D912+D1215;const double tmp217b=D1516+D1617;
+
+const double d2_1c=D12;const double d2_3c =D23; const double d2_4c=pow(D14*D14+D12*D12,0.5);const double d2_5c =D52; 
+const double d2_6c=pow(D25*D25+D56*D56,0.5);const double d2_7c=pow(D25*D25+ tmp27*tmp27,0.5);const double d2_8c=pow(D21*D21+tmp28*tmp28,0.5);
+const double d2_9c=D25+D59;const double d2_10c=pow(D910*D910+ tmp210*tmp210,0.5);const double d2_11c=pow(D12*D12+tmp211*tmp211,0.5);
+const double d2_12c=D25+D59+D912;const double d2_13c=pow(D1516*D1516+tmp213*tmp213,0.5);const double d2_14c=pow(D12*D12+tmp214*tmp214,0.5);
+const double d2_15c=D25+D59+D1215; const double d2_16c=pow(D1516*D1516+tmp216*tmp216,0.5);const double d2_17c=pow(tmp117a*tmp117a+tmp117b*tmp117b,0.5);
+
+//Note 3 other distances:
+const double tmp34=D12+D23;const double tmp38a=D12+D23;const double tmp38b=D14+D48;const double tmp39=D25+D59;const double tmp311a=D12+D23;
+const double tmp311b=D14+D48+D811;const double tmp312=D25+D59+D912;const double tmp313=D37+D710+D912;const double tmp314a=D12+D23;
+const double tmp314b=D14+D48+D811+D1114;const double tmp315=D25+D59+D912+D1215;const double tmp316=D37+D710+D1017;
+
+const double d3_1c=D12+D23;const double d3_2c=D23;const double d3_4c=pow(D14*D14+tmp34*tmp34,0.5);const double d3_5c =pow(D25*D25+D23*D23,0.5);
+const double d3_6c=pow(D37*D37+D67*D67,0.5);const double d3_7c=D37;const double d3_8c=pow(tmp38a*tmp38a+tmp38b*tmp38b,0.5);
+const double d3_9c=pow(D23*D23+tmp39*tmp39,0.5);const double d3_10c=D37+D710;const double d3_11c=pow(tmp311a*tmp311a+tmp311b*tmp311b,0.5);
+const double d3_12c=pow(D23*D23+tmp312*tmp312,0.5);const double d3_13c=pow(D1617*D1617+tmp313*tmp313,0.5);const double d3_14c=pow(tmp314a*tmp314a+tmp314b*tmp314a,0.5);
+const double d3_15c=pow(D23*D23+tmp315*tmp315,0.5);const double d3_16c=pow(D1617*D1617+tmp316*tmp316,0.5);const double d3_17c=D37+D710+D1017;
+
+
+//Node 4 other distances:
+const double tmp43=D12+D23;const double tmp410=D89+D910;const double tmp412=D48+D811;const double tmp413a=D48+D811;
+const double tmp413b=D1112+D1516; const double tmp415=D48+D811+D1114;const double tmp416a=D48+D811+D1114;const double tmp416b=D1415+D1516;
+const double tmp417a=D48+D811+D1114;const double tmp417b=D1415+D1516+D1617;
+
+const double d4_1c=D41;const double d4_2c=pow(D12*D12+D14*D14,0.5);const double d4_3c=pow(D14*D14+tmp43*tmp43,0.5);
+const double d4_5c =D45;const double d4_6c=D45+D56;const double d4_7c=D45+D56+D67;const double d4_8c=D14+D48;
+const double d4_9c=pow(D48*D48+D89*D89,0.5);const double d4_10c=pow(D48*D48+tmp410*tmp410,0.5);const double d4_11c=D48+D811;
+const double d4_12c=pow(D1112*D1112+tmp412*tmp412,0.5);const double d4_13c=pow(tmp413a*tmp413a+tmp413b*tmp413b,0.5);
+const double d4_14c=D48+D811+D1114;const double d4_15c=pow(D1415*D1415+tmp415*tmp415,0.5);
+const double d4_16c=pow(tmp416a*tmp416a+tmp416b*tmp416b,0.5);const double d4_17c=pow(tmp417a*tmp417a+tmp417b*tmp417b,0.5);
+
+
+//Node 5 other distances:
+const double tmp511=D48+D811;const double tmp513=D59+D912;const double tmp514=D48+D811+D1114;const double tmp516=D59+D912+D1215;
+const double tmp517a=D59+D912+D1215;const double tmp517b=D1516+D1617;
+
+const double d5_1c=pow(D12*D12+D25*D25,0.5);const double d5_2c=D52;const double d5_3c=pow(D23*D23+D25*D25,0.5);
+const double d5_4c =D54;const double d5_6c=D56;const double d5_7c=D56+D67;const double d5_8c=pow(D45*D45+D48*D48,0.5);
+const double d5_9c=D59;const double d5_10c=pow(D59*D59+D910*D910,0.5);const double d5_11c=pow(D45*D45+tmp511*tmp511,0.5);
+const double d5_12c=D59+D912;const double d5_13c=pow(D1516*D1516+tmp513*tmp513,0.5);const double d5_14c=pow(D45*D45+tmp514*tmp514,0.5);
+const double d5_15c=D59+D912+D1215;const double d5_16c=pow(D1516*D1516+tmp516*tmp516,0.5);const double d5_17c=pow(tmp517a*tmp517a+tmp517b*tmp517b,0.5);
+
+//Node 6 other distances:
+const double tmp61=D45+D56;const double tmp68=D45+D56;const double tmp611a=D45+D56;const double tmp611b=D48+D811;const double tmp612=D59+D912;
+const double tmp614a=D45+D56;const double tmp614b=D48+D811+D1114;const double tmp615=D59+D912+D1215;const double tmp617=D710+D1017;
+
+const double d6_1c=pow(D14*D14+tmp61*tmp61,0.5);const double d6_2c=pow(D25*D25+D56*D56,0.5);const double d6_3c=pow(D37*D37+D67*D67,0.5);
+const double d6_4c =D45+D56;const double d6_5c=D56;const double d6_7c=D67;const double d6_8c=pow(D48*D48+tmp68*tmp68,0.5);
+const double d6_9c=pow(D56*D56+D59*D59,0.5);const double d6_10c=pow(D67*D67+D710*D710,0.5);const double d6_11c=pow(tmp611a*tmp611a+tmp611b*tmp611b,0.5);
+const double d6_12c=pow(D56*D56+tmp612*tmp612,0.5);const double d6_13c=D59+D912;const double d6_14c=pow(tmp614a*tmp614a+tmp614b*tmp614b,0.5);
+const double d6_15c=pow(D56*D56+tmp615*tmp615,0.5);const double d6_16c=D59+D912+D1215;const double d6_17c=pow(D67*D67+tmp617*tmp617,0.5);
+
+//Node 7 other distances:
+const double tmp71=D45+D56+D67;const double tmp711=D12+D23;const double tmp78=D45+D56+D67;const double tmp79=D56+D67;
+const double tmp711a=D45+D56+D67;const double tmp711b=D48+D811;const double tmp712a=D56+D67;const double tmp712b=D59+D912;
+const double tmp713=D710+D912;const double tmp714a=D48+D811+D1114;const double tmp714b=D45+D56+D67;const double tmp715a=D59+D912+D1215;
+const double tmp715b=D56+D67;const double tmp716=D710+D1017;
+
+const double d7_1c=pow(tmp71*tmp71+D37*D37,0.5);const double d7_2c=pow(D23*D23+D37*D37,0.5);const double d7_3c=D73;
+const double d7_4c =D45+D56+D67;const double d7_5c=D56+D67;const double d7_6c=D56+D67;const double d7_8c=pow(D48*D48+tmp78*tmp78,0.5);
+const double d7_9c=pow(D59*D59+tmp79*tmp79,0.5);const double d7_10c=D710;const double d7_11c=pow(tmp711a*tmp711a+tmp711b*tmp711b,0.5);
+const double d7_12c=pow(tmp712a*tmp712a+tmp712b*tmp712b,0.5);const double d7_13c=pow(D1617*D1617+tmp713*tmp713,0.5);
+const double d7_14c=pow(tmp714a*tmp714a+tmp714b*tmp714b,0.5);const double d7_15c=pow(tmp715a*tmp715a+tmp715b*tmp715b,0.5);
+const double d7_16c=pow(D1617*D1617+tmp716*tmp716,0.5);const double d7_17c=D710+D1017;
+
+
+//Node 8 other distances:
+const double tmp82=D14+D48;const double tmp83a=D37+D710;const double tmp83b=D89+D910;const double tmp86=D45+D56;
+const double tmp87=D45+D56+D67;const double tmp813=D1112+D1516;const double tmp815=D811+D1114;const double tmp816a=D1415+D1516;
+const double tmp816b=D811+D1114;const double tmp817a=D1415+D1516+D1617;const double tmp817b=D811+D1114;
+
+const double d8_1c=D14+D48;const double d8_2c=pow(D12*D12+tmp82*tmp82,0.5);const double d8_3c=pow(tmp83a*tmp83a+tmp83b*tmp83b,0.5);
+const double d8_4c =D84;const double d8_5c=pow(D48*D48+D45*D45,0.5);const double d8_6c=pow(tmp86*tmp86+D84*D84,0.5);
+const double d8_7c=pow(D84*D84+tmp87*tmp87,0.5);const double d8_9c=D89;const double d8_10c=D89+D910;const double d8_11c=D811;
+const double d8_12c=pow(D811*D811+D1112*D1112,0.5);const double d8_13c=pow(D811*D811+tmp813*tmp813,0.5);
+const double d8_14c=D811+D1114;const double d8_15c=pow(D1415*D1415+tmp815*tmp815,0.5);
+const double d8_16c=pow(tmp816a*tmp816a+tmp816b*tmp816b,0.5);const double d8_17c=pow(tmp817a*tmp817a+tmp817b*tmp817b,0.5);
+
+//Node 9 other distances:
+const double tmp91=D14+D48;const double tmp93=D25+D59;const double tmp97=D56+D67;const double tmp914=D912+D1215;
+const double tmp916=D912+D1215;const double tmp917a=D912+D1215;const double tmp917b=D1516+D1617;
+
+const double d9_1c=pow(D89*D89+tmp91*tmp91,0.5);const double d9_2c=D25+D59;const double d9_3c=pow(D23*D23+tmp93*tmp93,0.5);
+const double d9_4c =pow(D84*D84+D89*D89,0.5);const double d9_5c=D95;const double d9_6c=pow(D56*D56+D95*D95,0.5);
+const double d9_7c=pow(D95*D95+tmp97*tmp97,0.5);const double d9_8c=D98;const double d9_10c=D910;
+const double d9_11c=pow(D89*D89+D811*D811,0.5);const double d9_12c=D912;const double d9_13c=D913;
+const double d9_14c=pow(D1415*D1415+tmp914*tmp914,0.5);const double d9_15c=D912+D1215;const double d9_16c=pow(D1516*D1516+tmp916*tmp916,0.5);
+const double d9_17c=pow(tmp917a*tmp917a+tmp917b*tmp917b,0.5);
+
+
+//Node 10 other distances:
+const double tmp101a=D14+D48;const double tmp101b=D89+D910;const double tmp102=D25+D59;const double tmp104=D89+D910;
+const double tmp1011=D89+D910;const double tmp1014=D1415+D1516+D1617;const double tmp1015=D1516+D1617;
+
+const double d10_1c=pow(tmp101a*tmp101a+tmp101b*tmp101b,0.5);const double d10_2c=pow(D910*D910+tmp102*tmp102,0.5);
+const double d10_3c=D37+D710;const double d10_4c =pow(D84*D84+tmp104*tmp104,0.5);
+const double d10_5c=pow(D59*D59+D910*D910,0.5);const double d10_6c=pow(D67*D67+D710*D710,0.5);
+const double d10_7c=D107;const double d10_8c=D89+D910;const double d10_9c=D910;const double d10_11c=pow(D811*D811+tmp1011*tmp1011,0.5);
+const double d10_12c=pow(D910*D910+D912*D912,0.5);const double d10_13c=D1013;
+const double d10_14c=pow(D1017*D1017+tmp1014*tmp1014,0.5);const double d10_15c=pow(D1017*D1017+tmp1015*tmp1015,0.5);
+const double d10_16c=pow(D1617*D1617+D1017*D1017,0.5);const double d10_17c=D1017;
+
+//Node 11 other distances:
+const double tmp112a=D14+D48+D811;const double tmp113ax=D12+D23;const double tmp113bx=D14+D48+D811;const double tmp115=D48+D811;
+const double tmp116a=D45+D56;const double tmp116b=D48+D811;const double tmp117ax=D45+D56+D67;const double tmp117bx=D48+D811;
+const double tmp1110=D89+D910;const double tmp1116=D1415+D1516;const double tmp1117=D1415+D1516+D1617;
+
+
+const double d11_1c=D14+D48+D811;const double d11_2c=pow(D12*D12+tmp112a*tmp112a,0.5);
+const double d11_3c=pow(tmp113ax*tmp113ax+tmp113bx*tmp113bx,0.5);const double d11_4c =D48+D811;
+const double d11_5c=pow(D45*D45+tmp115*tmp115,0.5);const double d11_6c=pow(tmp116a*tmp116a+tmp116b*tmp116b,0.5);
+const double d11_7c=pow(tmp117ax*tmp117ax+tmp117bx*tmp117bx,0.5);const double d11_8c=D811;
+const double d11_9c=pow(D89*D89+D811*D811,0.5);const double d11_10c=pow(D811*D811+tmp1110*tmp1110,0.5);
+const double d11_12c=D1112;const double d11_13c=D1112+D1516;const double d11_14c=D1114;const double d11_15c=pow(D1114*D1114+D1415*D1415,0.5);
+const double d11_16c=pow(D1114*D1114+tmp1116*tmp1116,0.5);const double d11_17c=pow(D1114*D1114+tmp1117*tmp1117,0.5);
+
+//Node 12 other distances:
+const double tmp121=D14+D48+D811;const double tmp123=D25+D59+D912;const double tmp124=D48+D811;const double tmp126=D59+D912;
+const double tmp127a=D56+D67;const double tmp127b=D59+D912;const double tmp1217=D1516+D1617;
+
+const double d12_1c=pow(D1112*D1112+tmp121*tmp121,0.5);const double d12_2c=D25+D59+D912;
+const double d12_3c=pow(D23*D23+tmp123*tmp123,0.5);const double d12_4c =pow(D1112*D1112+tmp124*tmp124,0.5);
+const double d12_5c=D59+D912;const double d12_6c=pow(D56*D56+tmp126*tmp126,0.5);const double d12_7c=pow(tmp127a*tmp127a+tmp127b*tmp127b,0.5);
+const double d12_8c=pow(D811*D811+D1112*D1112,0.5);const double d12_9c=D129;const double d12_10c=pow(D910*D910+D912*D912,0.5);
+const double d12_11c=D1211;const double d12_13c=D1516;const double d12_14c=pow(D1215*D1215+D1415*D1415,0.5);const double d12_15c=D1215;
+const double d12_16c=pow(D1516*D1516+tmp516*tmp516,0.5);const double d12_17c=pow(D1215*D1215+tmp1217*tmp1217,0.5);
+
+//Node 13 other distances:
+const double tmp131a=D1112+D1516;const double tmp131b=D14+D48+D811;const double tmp132=D25+D59+D912;const double tmp133=D37+D710+D912;
+const double tmp134a=D48+D811;const double tmp134b=D1112+D1516;const double tmp135=D59+D912;const double tmp137=D710+D912;
+const double tmp138=D1112+D1516;const double tmp1314=D1415+D1516;
+//const double x = (D139*D139) - (D910/2 * D910/2); //IMP: have Do check Dhis laDer!
+
+
+const double d13_1c=pow(tmp131a*tmp131a+tmp131b*tmp131b,0.5);const double d13_2c=pow(D1516*D1516+tmp132*tmp132,0.5);
+const double d13_3c=pow(D1617*D1617+tmp133*tmp133,0.5);const double d13_4c =pow(tmp134a*tmp134a+tmp134b*tmp134b,0.5);
+const double d13_5c=pow(D1516*D1516+tmp135*tmp135,0.5);const double d13_6c=D95+D912; //IMP: have Do check Dhis laDer!
+const double d13_7c=pow(D1617*D1617+tmp137*tmp137,0.5);const double d13_8c=pow(D118*D118+tmp138*tmp138,0.5);
+const double d13_9c=D139;const double d13_10c=D1310;const double d13_11c=D1112+D1516;const double d13_12c=D1516;
+const double d13_14c=pow(D1316*D1316+tmp1314*tmp1314,0.5);const double d13_15c=pow(D1613*D1613+D1516*D1516,0.5);
+const double d13_16c=D1316;const double d13_17c=pow(D1316*D1316+D1617*D1617,0.5);
+
+//Node 14 other distances:
+const double tmp142=D14+D48+D811+D1114;const double tmp143a=D12+D23;const double tmp143b=D14+D48+D811+D1114;
+const double tmp145=D48+D811+D1114;const double tmp146a=D45+D56;const double tmp146b=D48+D811+D1114;const double tmp147a=D45+D56+D67;
+const double tmp147b=D48+D811+D1114;const double tmp149=D811+D1114;const double tmp1410a=D89+D910;const double tmp1410b=D811+D1114;
+const double tmp1413=D1112+D1516;
+
+const double d14_1c=D14+D48+D811+D1114;const double d14_2c=pow(D12*D12+tmp142*tmp142,0.5);const double d14_3c=pow(tmp143a*tmp143a+tmp143b*tmp143b,0.5);
+const double d14_4c =D48+D811+D1114;const double d14_5c=pow(D45*D45+tmp145*tmp145,0.5);const double d14_6c=pow(tmp146a*tmp146a+tmp146b*tmp146b,0.5);
+const double d14_7c=pow(tmp147a*tmp147a+tmp147b*tmp147b,0.5);const double d14_8c=D811+D1114;const double d14_9c=pow(D89*D89+tmp149*tmp149,0.5);
+const double d14_10c=pow(tmp1410a*tmp1410a+tmp1410b*tmp1410b,0.5);const double d14_11c=D1411;const double d14_12c=pow(D1112*D1112+D1114*D1114,0.5);
+const double d14_13c=pow(D1114*D1114+tmp1413*tmp1413,0.5);const double d14_15c=D1415;const double d14_16c=D1415+D1516;
+const double d14_17c=D1415+D1516+D1617;
+
+//Node 15 other distances:
+const double tmp151=D14+D48+D811+D1114;const double tmp153=D25+D59+D912+D1215;const double tmp154=D48+D811+D1114;
+const double tmp156=D59+D912+D1215;const double tmp157a=D59+D912+D1215;const double tmp157b=D56+D67;const double tmp158=D811+D1114;
+const double tmp1510=D912+D1215;
+
+const double d15_1c=pow(D1415*D1415+tmp151*tmp151,0.5);const double d15_2c=D25+D59+D912+D1215;const double d15_3c=pow(D23*D23+tmp153*tmp153,0.5);
+const double d15_4c =pow(D1415*D1415+tmp154*tmp154,0.5);const double d15_5c=D59+D912+D1215;const double d15_6c=pow(D65*D65+tmp156*tmp156,0.5);
+const double d15_7c=pow(tmp157a*tmp157a+tmp157b*tmp157b,0.5);const double d15_8c=pow(D1415*D1415+tmp158*tmp158,0.5);
+const double d15_9c=D912+D1215;const double d15_10c=pow(D910*D910+tmp1510*tmp1510,0.5);const double d15_11c=pow(D1114*D1114+D1415*D1415,0.5);
+const double d15_12c=D1512;const double d15_13c=pow(D1215*D1215+D1516*D1516,0.5);const double d15_14c=D1514;const double d15_16c=D1516;
+const double d15_17c=D1516+D1617;
+
+//Node 16 other distances:
+const double tmp161a=D1415+D1516;const double tmp161b=D14+D48+D811+D1114;const double tmp162=D25+D59+D912+D1215;
+const double tmp163=D37+D710+D1017;const double tmp164a=D1415+D1516;const double tmp164b=D48+D811+D1114;const double tmp165=D59+D912+D1215;
+const double tmp167=D710+D1017;const double tmp168a=D811+D1114;const double tmp168b=D1415+D1516;const double tmp169=D912+D1215;
+const double tmp1611=D1415+D1516;
+
+
+const double d16_1c=pow(tmp161a*tmp161a+tmp161b*tmp161b,0.5);const double d16_2c=pow(D1516*D1516+tmp162*tmp162,0.5);
+const double d16_3c=pow(D1617*D1617+tmp163*tmp163,0.5);const double d16_4c=pow(tmp164a*tmp164a+tmp164b*tmp164b,0.5);
+const double d16_5c=pow(D1516*D1516+tmp165*tmp165,0.5);const double d16_6c= D59+D912+D1215;
+const double d16_7c=pow(D1617*D1617+tmp167*tmp167,0.5);const double d16_8c=pow(tmp168a*tmp168a+tmp168b*tmp168b,0.5);
+const double d16_9c=pow(D1516*D1516+tmp169*tmp169,0.5);const double d16_10c=pow(D1017*D1017+D1617*D1617,0.5);
+const double d16_11c=pow(D1114*D1114+tmp1611*tmp1611,0.5);const double d16_12c=pow(D1215*D1215+D1516*D1516,0.5);
+const double d16_13c=D1613;const double d16_14c=D1415+D1516;const double d16_15c=D1615;const double d16_17c=D1617;
+
+//Node 17 other distances:
+const double tmp171a=D14+D48+D811+D1114;const double tmp171b=D1415+D1516+D1617;const double tmp172a=D1516+D1617;
+const double tmp172b=D25+D59+D912+D1215;const double tmp175a=D1516+D1617;const double tmp175b=D59+D912+D1215;
+const double tmp176=D710+D1017;const double tmp178a=D811+D1114;const double tmp178b=D1415+D1516+D1617;const double tmp179a=D912+D1215;
+const double tmp179b=D1516+D1617;const double tmp1711=D1415+D1516+D1617;const double tmp1712=D1516+D1617;
+
+const double d17_1c=pow(tmp171a*tmp171a+tmp171b*tmp171b,0.5);const double d17_2c=pow(tmp172a*tmp172a+tmp172b*tmp172b,0.5);
+const double d17_3c=D37+D710+D1017;const double d17_4c =D1415+D1516+D1617;const double d17_5c=pow(tmp175a*tmp175a+tmp175b*tmp175b,0.5);
+const double d17_6c=pow(D67*D67+tmp176*tmp176,0.5);const double d17_7c=D710+D1017;const double d17_8c=pow(tmp178a*tmp178a+tmp178b*tmp178b,0.5);
+const double d17_9c=pow(tmp179a*tmp179a+tmp179b*tmp179b,0.5);const double d17_10c=D1710;
+const double d17_11c=pow(D1114*D1114+tmp1711*tmp1711,0.5);const double d17_12c=pow(D1512*D1512+tmp1712*tmp1712,0.5);
+const double d17_13c=pow(D1617*D1617+D1613*D1613,0.5);const double d17_14c=D1415+D1516+D1617;const double d17_15c=D1516+D1617;
+const double d17_16c=D1716;
+
+formula cloudyNeighbor1 = (cloudyNode=1)|(cloudyNode=2 & d1_2c<=cloudRadius)|(cloudyNode=3 & d1_3c<=cloudRadius)|
+(cloudyNode=4 & d1_4c<=cloudRadius)|(cloudyNode=5 & d1_5c<=cloudRadius)|(cloudyNode=6 & d1_6c<=cloudRadius)|(cloudyNode=7 & d1_7c<=cloudRadius)|
+(cloudyNode=8 & d1_8c<=cloudRadius)|(cloudyNode=9 & d1_9c<=cloudRadius)|(cloudyNode=10 & d1_10c<=cloudRadius)|(cloudyNode=11 & d1_11c<=cloudRadius)|
+(cloudyNode=12 & d1_12c<=cloudRadius)|(cloudyNode=13 & d1_13c<=cloudRadius)|(cloudyNode=14 & d1_14c<=cloudRadius)|(cloudyNode=15 & d1_15c<=cloudRadius)|
+(cloudyNode=16 & d1_16c<=cloudRadius)|(cloudyNode=17 & d1_17c<=cloudRadius);
+
+formula cloudyNeighbor2 = (cloudyNode=1 & d2_1c<=cloudRadius)|(cloudyNode=2)|(cloudyNode=3 & d2_3c<=cloudRadius)|
+(cloudyNode=4 & d2_4c<=cloudRadius)|(cloudyNode=5 & d2_5c<=cloudRadius)|(cloudyNode=6 & d2_6c<=cloudRadius)|(cloudyNode=7 & d2_7c<=cloudRadius)|
+(cloudyNode=8 & d2_8c<=cloudRadius)|(cloudyNode=9 & d2_9c<=cloudRadius)|(cloudyNode=10 & d2_10c<=cloudRadius)|(cloudyNode=11 & d2_11c<=cloudRadius)|
+(cloudyNode=12 & d2_12c<=cloudRadius)|(cloudyNode=13 & d2_13c<=cloudRadius)|(cloudyNode=14 & d2_14c<=cloudRadius)|(cloudyNode=15 & d2_15c<=cloudRadius)|
+(cloudyNode=16 & d2_16c<=cloudRadius)|(cloudyNode=17 & d2_17c<=cloudRadius);
+
+formula cloudyNeighbor3 = (cloudyNode=1 & d3_1c<=cloudRadius)|(cloudyNode=2 & d3_2c<=cloudRadius)|(cloudyNode=3)|
+(cloudyNode=4 & d3_4c<=cloudRadius)|(cloudyNode=5 & d3_5c<=cloudRadius)|(cloudyNode=6 & d3_6c<=cloudRadius)|(cloudyNode=7 & d3_7c<=cloudRadius)|
+(cloudyNode=8 & d3_8c<=cloudRadius)|(cloudyNode=9 & d3_9c<=cloudRadius)|(cloudyNode=10 & d3_10c<=cloudRadius)|(cloudyNode=11 & d3_11c<=cloudRadius)|
+(cloudyNode=12 & d3_12c<=cloudRadius)|(cloudyNode=13 & d3_13c<=cloudRadius)|(cloudyNode=14 & d3_14c<=cloudRadius)|(cloudyNode=15 & d3_15c<=cloudRadius)|
+(cloudyNode=16 & d3_16c<=cloudRadius)|(cloudyNode=17 & d3_17c<=cloudRadius);
+
+formula cloudyNeighbor4 = (cloudyNode=1 & d4_1c<=cloudRadius)|(cloudyNode=2 & d4_2c<=cloudRadius)|(cloudyNode=3 & d4_3c<=cloudRadius)|
+(cloudyNode=4)|(cloudyNode=5  & d4_5c<=cloudRadius )|(cloudyNode=6 & d4_6c<=cloudRadius)|(cloudyNode=7 & d4_7c<=cloudRadius)|
+(cloudyNode=8 & d4_8c<=cloudRadius)|(cloudyNode=9 & d4_9c<=cloudRadius)|(cloudyNode=10 & d4_10c<=cloudRadius)|(cloudyNode=11 & d4_11c<=cloudRadius)|
+(cloudyNode=12 & d4_12c<=cloudRadius)|(cloudyNode=13 & d4_13c<=cloudRadius)|(cloudyNode=14 & d4_14c<=cloudRadius)|(cloudyNode=15 & d4_15c<=cloudRadius)|
+(cloudyNode=16 & d4_16c<=cloudRadius)|(cloudyNode=17 & d4_17c<=cloudRadius);
+
+formula cloudyNeighbor5 = (cloudyNode=1 & d5_1c<=cloudRadius)|(cloudyNode=2 & d5_2c<=cloudRadius)|(cloudyNode=3 & d5_3c<=cloudRadius)|
+(cloudyNode=4 & d5_4c<=cloudRadius)|(cloudyNode=5)|(cloudyNode=6 & d5_6c<=cloudRadius)|(cloudyNode=7 & d5_7c<=cloudRadius)|
+(cloudyNode=8 & d5_8c<=cloudRadius)|(cloudyNode=9 & d5_9c<=cloudRadius)|(cloudyNode=10 & d5_10c<=cloudRadius)|(cloudyNode=11 & d5_11c<=cloudRadius)|
+(cloudyNode=12 & d5_12c<=cloudRadius)|(cloudyNode=13 & d5_13c<=cloudRadius)|(cloudyNode=14 & d5_14c<=cloudRadius)|(cloudyNode=15 & d5_15c<=cloudRadius)|
+(cloudyNode=16 & d5_16c<=cloudRadius)|(cloudyNode=17 & d5_17c<=cloudRadius);
+
+formula cloudyNeighbor6 = (cloudyNode=1 & d6_1c<=cloudRadius)|(cloudyNode=2 & d6_2c<=cloudRadius)|(cloudyNode=3 & d6_3c<=cloudRadius)|
+(cloudyNode=4 & d6_4c<=cloudRadius)|(cloudyNode=5 & d6_5c<=cloudRadius)|(cloudyNode=6)|(cloudyNode=7 & d6_7c<=cloudRadius)|
+(cloudyNode=8 & d6_8c<=cloudRadius)|(cloudyNode=9 & d6_9c<=cloudRadius)|(cloudyNode=10 & d6_10c<=cloudRadius)|(cloudyNode=11 & d6_11c<=cloudRadius)|
+(cloudyNode=12 & d6_12c<=cloudRadius)|(cloudyNode=13 & d6_13c<=cloudRadius)|(cloudyNode=14 & d6_14c<=cloudRadius)|(cloudyNode=15 & d6_15c<=cloudRadius)|
+(cloudyNode=16 & d6_16c<=cloudRadius)|(cloudyNode=17 & d6_17c<=cloudRadius);
+
+formula cloudyNeighbor7 = (cloudyNode=1 & d7_1c<=cloudRadius)|(cloudyNode=2 & d7_2c<=cloudRadius)|(cloudyNode=3 & d7_3c<=cloudRadius)|
+(cloudyNode=4 & d7_4c<=cloudRadius)|(cloudyNode=5 & d7_5c<=cloudRadius)|(cloudyNode=6 & d7_6c<=cloudRadius)|(cloudyNode=7)|
+(cloudyNode=8 & d7_8c<=cloudRadius)|(cloudyNode=9 & d7_9c<=cloudRadius)|(cloudyNode=10 & d7_10c<=cloudRadius)|(cloudyNode=11 & d7_11c<=cloudRadius)|
+(cloudyNode=12 & d7_12c<=cloudRadius)|(cloudyNode=13 & d7_13c<=cloudRadius)|(cloudyNode=14 & d7_14c<=cloudRadius)|(cloudyNode=15 & d7_15c<=cloudRadius)|
+(cloudyNode=16 & d7_16c<=cloudRadius)|(cloudyNode=17 & d7_17c<=cloudRadius);
+
+formula cloudyNeighbor8 = (cloudyNode=1 & d8_1c<=cloudRadius)|(cloudyNode=2 & d8_2c<=cloudRadius)|(cloudyNode=3 & d8_3c<=cloudRadius)|
+(cloudyNode=4 & d8_4c<=cloudRadius)|(cloudyNode=5 & d8_5c<=cloudRadius)|(cloudyNode=6 & d8_6c<=cloudRadius)|(cloudyNode=7 & d8_7c<=cloudRadius)|
+(cloudyNode=8)|(cloudyNode=9 & d8_9c<=cloudRadius)|(cloudyNode=10 & d8_10c<=cloudRadius)|(cloudyNode=11 & d8_11c<=cloudRadius)|
+(cloudyNode=12 & d8_12c<=cloudRadius)|(cloudyNode=13 & d8_13c<=cloudRadius)|(cloudyNode=14 & d8_14c<=cloudRadius)|(cloudyNode=15 & d8_15c<=cloudRadius)|
+(cloudyNode=16 & d8_16c<=cloudRadius)|(cloudyNode=17 & d8_17c<=cloudRadius);
+
+formula cloudyNeighbor9 = (cloudyNode=1 & d9_1c<=cloudRadius)|(cloudyNode=2 & d9_2c<=cloudRadius)|(cloudyNode=3 & d9_3c<=cloudRadius)|
+(cloudyNode=4 & d9_4c<=cloudRadius)|(cloudyNode=5 & d9_5c<=cloudRadius)|(cloudyNode=6 & d9_6c<=cloudRadius)|(cloudyNode=7 & d9_7c<=cloudRadius)|
+(cloudyNode=8 & d9_8c<=cloudRadius)|(cloudyNode=9 )|(cloudyNode=10 & d9_10c<=cloudRadius)|(cloudyNode=11 & d9_11c<=cloudRadius)|
+(cloudyNode=12 & d9_12c<=cloudRadius)|(cloudyNode=13 & d9_13c<=cloudRadius)|(cloudyNode=14 & d9_14c<=cloudRadius)|(cloudyNode=15 & d9_15c<=cloudRadius)|
+(cloudyNode=16 & d9_16c<=cloudRadius)|(cloudyNode=17 & d9_17c<=cloudRadius);
+
+formula cloudyNeighbor10 = (cloudyNode=1 & d10_1c<=cloudRadius)|(cloudyNode=2 & d10_2c<=cloudRadius)|(cloudyNode=3 & d10_3c<=cloudRadius)|
+(cloudyNode=4 & d10_4c<=cloudRadius)|(cloudyNode=5 & d10_5c<=cloudRadius)|(cloudyNode=6 & d10_6c<=cloudRadius)|(cloudyNode=7 & d10_7c<=cloudRadius)|
+(cloudyNode=8 & d10_8c<=cloudRadius)|(cloudyNode=9 & d10_9c<=cloudRadius)|(cloudyNode=10)|(cloudyNode=11 & d10_11c<=cloudRadius)|
+(cloudyNode=12 & d10_12c<=cloudRadius)|(cloudyNode=13 & d10_13c<=cloudRadius)|(cloudyNode=14 & d10_14c<=cloudRadius)
+|(cloudyNode=15 & d10_15c<=cloudRadius)| (cloudyNode=16 & d10_16c<=cloudRadius)|(cloudyNode=17 & d10_17c<=cloudRadius);
+
+formula cloudyNeighbor11 = (cloudyNode=1 & d11_1c<=cloudRadius)|(cloudyNode=2 & d11_2c<=cloudRadius)|(cloudyNode=3 & d11_3c<=cloudRadius)|
+(cloudyNode=4 & d11_4c<=cloudRadius)|(cloudyNode=5 & d11_5c<=cloudRadius)|(cloudyNode=6 & d11_6c<=cloudRadius)|(cloudyNode=7 & d11_7c<=cloudRadius)|
+(cloudyNode=8 & d11_8c<=cloudRadius)|(cloudyNode=9 & d11_9c<=cloudRadius)|(cloudyNode=10 & d11_10c<=cloudRadius)|(cloudyNode=11)|
+(cloudyNode=12 & d11_12c<=cloudRadius)|(cloudyNode=13 & d11_13c<=cloudRadius)|(cloudyNode=14 & d11_14c<=cloudRadius)|(cloudyNode=15 & d11_15c<=cloudRadius)|
+(cloudyNode=16 & d11_16c<=cloudRadius)|(cloudyNode=17 & d11_17c<=cloudRadius);
+
+formula cloudyNeighbor12 = (cloudyNode=1 & d12_1c<=cloudRadius)|(cloudyNode=2 & d12_2c<=cloudRadius)|(cloudyNode=3 & d12_3c<=cloudRadius)|
+(cloudyNode=4 & d12_4c<=cloudRadius)|(cloudyNode=5 & d12_5c<=cloudRadius)|(cloudyNode=6 & d12_6c<=cloudRadius)|(cloudyNode=7 & d12_7c<=cloudRadius)|
+(cloudyNode=8 & d12_8c<=cloudRadius)|(cloudyNode=9 & d12_9c<=cloudRadius)|(cloudyNode=10 & d12_10c<=cloudRadius)|(cloudyNode=11 & d12_11c<=cloudRadius)|
+(cloudyNode=12)|(cloudyNode=13 & d12_13c<=cloudRadius)|(cloudyNode=14 & d12_14c<=cloudRadius)|(cloudyNode=15 & d12_15c<=cloudRadius)|
+(cloudyNode=16 & d12_16c<=cloudRadius)|(cloudyNode=17 & d12_17c<=cloudRadius);
+
+formula cloudyNeighbor13 = (cloudyNode=1 & d13_1c<=cloudRadius)|(cloudyNode=2 & d13_2c<=cloudRadius)|(cloudyNode=3 & d13_3c<=cloudRadius)|
+(cloudyNode=4 & d13_4c<=cloudRadius)|(cloudyNode=5 & d13_5c<=cloudRadius)|(cloudyNode=6 & d13_6c<=cloudRadius)|(cloudyNode=7 & d13_7c<=cloudRadius)|
+(cloudyNode=8 & d13_8c<=cloudRadius)|(cloudyNode=9 & d13_9c<=cloudRadius)|(cloudyNode=10 & d13_10c<=cloudRadius)|(cloudyNode=11 & d13_11c<=cloudRadius)|
+(cloudyNode=12 & d13_12c<=cloudRadius)|(cloudyNode=13)|(cloudyNode=14 & d13_14c<=cloudRadius)|(cloudyNode=15 & d13_15c<=cloudRadius)|
+(cloudyNode=16 & d13_16c<=cloudRadius)|(cloudyNode=17& d13_17c<=cloudRadius);
+
+formula cloudyNeighbor14 = (cloudyNode=1 & d14_1c<=cloudRadius)|(cloudyNode=2 & d14_2c<=cloudRadius)|(cloudyNode=3 & d14_3c<=cloudRadius)|
+(cloudyNode=4 & d14_4c<=cloudRadius)|(cloudyNode=5 & d14_5c<=cloudRadius)|(cloudyNode=6 & d14_6c<=cloudRadius)|(cloudyNode=7 & d14_7c<=cloudRadius)|
+(cloudyNode=8 & d14_8c<=cloudRadius)|(cloudyNode=9 & d14_9c<=cloudRadius)|(cloudyNode=10 & d14_10c<=cloudRadius)|(cloudyNode=11 & d14_11c<=cloudRadius)|
+(cloudyNode=12 & d14_12c<=cloudRadius)|(cloudyNode=13 & d14_13c<=cloudRadius)|(cloudyNode=14)|(cloudyNode=14 & d14_15c<=cloudRadius)|
+(cloudyNode=16 & d14_16c<=cloudRadius)|(cloudyNode=17 & d14_17c<=cloudRadius);
+
+formula cloudyNeighbor15 = (cloudyNode=1 & d15_1c<=cloudRadius)|(cloudyNode=2 & d15_2c<=cloudRadius)|(cloudyNode=3 & d15_3c<=cloudRadius)|
+(cloudyNode=4 & d15_4c<=cloudRadius)|(cloudyNode=515 & d15_5c<=cloudRadius)|(cloudyNode=6 & d15_6c<=cloudRadius)|(cloudyNode=7 & d15_7c<=cloudRadius)|
+(cloudyNode=8 & d15_8c<=cloudRadius)|(cloudyNode=9 & d15_9c<=cloudRadius)|(cloudyNode=10 & d15_10c<=cloudRadius)|(cloudyNode=11 & d15_11c<=cloudRadius)|
+(cloudyNode=12 & d15_12c<=cloudRadius)|(cloudyNode=13 & d15_13c<=cloudRadius)|(cloudyNode=14 & d15_14c<=cloudRadius)
+|(cloudyNode=15)|(cloudyNode=16 & d15_16c<=cloudRadius)|(cloudyNode=17 & d15_17c<=cloudRadius);
+
+formula cloudyNeighbor16 = (cloudyNode=1 & d16_1c<=cloudRadius)|(cloudyNode=2 & d16_2c<=cloudRadius)|(cloudyNode=3 & d16_3c<=cloudRadius)|
+(cloudyNode=4 & d16_4c<=cloudRadius)|(cloudyNode=516 & d16_5c<=cloudRadius)|(cloudyNode=6 & d16_6c<=cloudRadius)|(cloudyNode=7 & d16_7c<=cloudRadius)|
+(cloudyNode=8 & d16_8c<=cloudRadius)|(cloudyNode=9 & d16_9c<=cloudRadius)|(cloudyNode=10 & d16_10c<=cloudRadius)|(cloudyNode=11 & d16_11c<=cloudRadius)|
+(cloudyNode=12 & d16_12c<=cloudRadius)|(cloudyNode=13 & d16_13c<=cloudRadius)|(cloudyNode=14 & d16_14c<=cloudRadius)
+|(cloudyNode=15 & d16_15c<=cloudRadius)| (cloudyNode=16) |(cloudyNode=17 & d16_17c<=cloudRadius);
+
+formula cloudyNeighbor17 = (cloudyNode=1 & d17_1c<=cloudRadius)|(cloudyNode=2 & d17_2c<=cloudRadius)|(cloudyNode=3 & d17_3c<=cloudRadius)|
+(cloudyNode=4 & d17_4c<=cloudRadius)|(cloudyNode=517 &d17_5c<=cloudRadius)|(cloudyNode=6 & d17_6c<=cloudRadius)|(cloudyNode=7 & d17_7c<=cloudRadius)|
+(cloudyNode=8 & d17_8c<=cloudRadius)|(cloudyNode=9 & d17_9c<=cloudRadius)|(cloudyNode=10 & d17_10c<=cloudRadius)|(cloudyNode=11 & d17_11c<=cloudRadius)|
+(cloudyNode=12 & d17_12c<=cloudRadius)|(cloudyNode=13 & d17_13c<=cloudRadius)|(cloudyNode=14 & d17_14c<=cloudRadius)
+|(cloudyNode=15 & d17_15c<=cloudRadius)|(cloudyNode=16 & d17_16c<=cloudRadius)|(cloudyNode=17);
+
+formula rainystate = (s=1)?cloudyNeighbor1:(s=2)?cloudyNeighbor2:(s=3)?cloudyNeighbor3:
+(s=4)?cloudyNeighbor4:(s=5)?cloudyNeighbor5:(s=6)?cloudyNeighbor6:(s=7)?cloudyNeighbor7:
+(s=8)?cloudyNeighbor8:(s=9)?cloudyNeighbor9:(s=10)?cloudyNeighbor10:(s=11)?cloudyNeighbor11:
+(s=12)?cloudyNeighbor12:(s=13)?cloudyNeighbor13:(s=14)?cloudyNeighbor14:(s=15)?cloudyNeighbor15:
+(s=16)?cloudyNeighbor16:cloudyNeighbor17;
+

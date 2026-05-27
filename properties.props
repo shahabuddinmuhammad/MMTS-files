@@ -1,0 +1,38 @@
+R{"time"}min=? [ F done ]
+
+multi(R{"time"}min=? [ C ], R{"mode_switches"}min=? [ C ])
+
+multi(R{"time"}min=? [ C ], R{"emission"}min=? [ C ])
+
+multi(R{"time"}min=? [ C ], R{"travel_cost"}min=? [ C ])
+
+R{"emission"}min=? [ F done ]
+
+R{"travel_cost"}min=? [ F done ]
+
+R{"mode_switches"}min=? [ F done ]
+
+R{"hops"}min=? [ F done ]
+
+A [ G ("deadlock"=>done) ]
+
+R{"scalar"}min=? [ F done ]
+
+Pmax=? [ F<=T done ]
+
+Pmax=? [ F<=20 (done&(ccar|ctrain)) ]
+
+multi(Pmin=? [ F<=T done ], R{"time"}min=? [ F done ])
+
+E [ F done ]
+
+Pmin=? [ F>T !done ]
+
+Pmin=? [ G ( !"deadlock" | (s=Destination) ) ]
+
+Pmax=? [ G ( (s!=Destination) => (canTakeCycle | canTakeCar | canTakeBus | canTakeTrain) ) ]
+
+Pmin=? [ G ( (ccycle => !(ccar | cbus | ctrain)) & (ccar => !(ccycle | cbus | ctrain)) & (cbus => !(ccycle | ccar | ctrain)) & (ctrain => !(ccycle | ccar | cbus)) ) ]
+
+Pmax=? [ F (s=Destination) ]
+
